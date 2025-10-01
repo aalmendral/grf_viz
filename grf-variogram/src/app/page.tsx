@@ -94,15 +94,25 @@ function buildCovarianceKernel({
     return maternCov(r, 1, maternNu);
   };
 
-  // Toroidal distances ensure a circulant embedding (periodic boundary)
+  // Proper toroidal anisotropic distance: minimize over 9 nearest periodic images
   for (let j = 0; j < ny; j++) {
-    const dyWrap = j <= ny / 2 ? j : j - ny;
+    const dy0 = j <= ny / 2 ? j : j - ny;
     for (let i = 0; i < nx; i++) {
-      const dxWrap = i <= nx / 2 ? i : i - nx;
-      const xr = dxWrap * ct + dyWrap * st; // rotate by -theta
-      const yr = -dxWrap * st + dyWrap * ct;
-      const rScaled = Math.sqrt((xr / a) * (xr / a) + (yr / b) * (yr / b));
-      let c = chooseCov(rScaled);
+      const dx0 = i <= nx / 2 ? i : i - nx;
+      let best = Infinity;
+      // examine shifts in {-1,0,1} * (nx, ny)
+      for (let sy = -1; sy <= 1; sy++) {
+        const dy = dy0 - sy * ny;
+        for (let sx = -1; sx <= 1; sx++) {
+          const dx = dx0 - sx * nx;
+          // rotate by -theta then scale by (a,b)
+          const xr = dx * ct + dy * st;
+          const yr = -dx * st + dy * ct;
+          const rScaled = Math.sqrt((xr / a) * (xr / a) + (yr / b) * (yr / b));
+          if (rScaled < best) best = rScaled;
+        }
+      }
+      let c = chooseCov(best);
       if (!Number.isFinite(c)) c = 0;
       cov[j * nx + i] = c;
     }
@@ -329,7 +339,10 @@ function drawFieldToCanvas(
   field: Float64Array,
   nx: number,
   ny: number,
-  zoom = 1
+  zoom: number,
+  colorMap: ColorMapId,
+  min: number,
+  max: number
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -339,31 +352,96 @@ function drawFieldToCanvas(
   canvas.height = h;
 
   const img = ctx.createImageData(w, h);
-
-  let fmin = Infinity, fmax = -Infinity;
-  for (const v of field) {
-    if (v < fmin) fmin = v;
-    if (v > fmax) fmax = v;
-  }
-  const span = fmax - fmin || 1;
+  const span = max - min || 1;
 
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const fx = Math.floor(x / zoom);
       const fy = Math.floor(y / zoom);
-      const v = (field[fy * nx + fx] - fmin) / span; // 0..1
-      const c = Math.pow(v, 0.9);
-      const r = Math.max(0, Math.min(255, Math.floor(255 * c)));
-      const g = Math.max(0, Math.min(255, Math.floor(255 * (0.9 * c + 0.1 * (1 - c)))));
-      const b = Math.max(0, Math.min(255, Math.floor(255 * (0.8 * (1 - c) + 0.2 * c))));
+      const t = (field[fy * nx + fx] - min) / span; // 0..1 normalized
+      const [r, g, b] = mapColor01(t, colorMap);
       const idx = (y * w + x) * 4;
-      img.data[idx + 0] = r;
+      img.data[idx] = r;
       img.data[idx + 1] = g;
       img.data[idx + 2] = b;
       img.data[idx + 3] = 255;
     }
   }
   ctx.putImageData(img, 0, 0);
+}
+
+// Shared color mapping (0..1 -> RGB tuple)
+type ColorMapId = "terrain" | "viridis" | "magma" | "coolwarm" | "grayscale";
+
+// Generate/interpolate viridis & magma (small static sampled arrays for brevity)
+const VIRIDIS = [
+  [68,1,84],[71,44,122],[59,81,139],[44,113,142],[33,144,141],[39,173,129],[92,200,99],[170,220,50],[253,231,37]
+];
+const MAGMA = [
+  [0,0,3],[28,16,68],[79,18,123],[129,37,129],[181,54,122],[229,80,100],[251,135,97],[254,194,135],[252,253,191]
+];
+const COOLWARM = [
+  [59,76,192],[102,126,217],[146,166,235],[195,204,245],[233,236,247],[255,255,255],[244,225,204],[240,189,164],[229,133,98],[203,70,32],[180,4,38]
+];
+
+function lerp(a:number,b:number,t:number){return a+(b-a)*t;}
+function sampleStops(stops:number[][], t:number):[number,number,number]{
+  const n=stops.length; if(n===0) return [0,0,0]; if(n===1) return stops[0] as [number,number,number];
+  const x = Math.min(1, Math.max(0, t))*(n-1);
+  const i = Math.floor(x); const f = x - i; const s0=stops[i]; const s1=stops[Math.min(n-1,i+1)];
+  return [
+    Math.round(lerp(s0[0], s1[0], f)),
+    Math.round(lerp(s0[1], s1[1], f)),
+    Math.round(lerp(s0[2], s1[2], f))
+  ];
+}
+
+function mapColor01(v: number, cmap: ColorMapId): [number, number, number] {
+  const t = Math.min(1, Math.max(0, v));
+  switch (cmap) {
+    case "viridis": return sampleStops(VIRIDIS, t);
+    case "magma": return sampleStops(MAGMA, t);
+    case "coolwarm": return sampleStops(COOLWARM, t);
+    case "grayscale": {
+      const g = Math.round(t * 255); return [g, g, g];
+    }
+    case "terrain":
+    default: {
+      // Original terrain-like mapping
+      const c = Math.pow(t, 0.9);
+      const r = Math.max(0, Math.min(255, Math.floor(255 * c)));
+      const g = Math.max(0, Math.min(255, Math.floor(255 * (0.9 * c + 0.1 * (1 - c)))));
+      const b = Math.max(0, Math.min(255, Math.floor(255 * (0.8 * (1 - c) + 0.2 * c))));
+      return [r, g, b];
+    }
+  }
+}
+
+// Simple color bar component
+function ColorBar({ min, max, width = 260, height = 20, cmap }: { min: number; max: number; width?: number; height?: number; cmap: ColorMapId }) {
+  const ref = React.useRef<HTMLCanvasElement | null>(null);
+  useEffect(() => {
+    const canvas = ref.current; if (!canvas) return;
+    const ctx = canvas.getContext("2d"); if (!ctx) return;
+    canvas.width = width; canvas.height = height;
+    const img = ctx.createImageData(width, height);
+    for (let x = 0; x < width; x++) {
+      const t = x / (width - 1);
+      const [r, g, b] = mapColor01(t, cmap);
+      for (let y = 0; y < height; y++) {
+        const idx = (y * width + x) * 4;
+        img.data[idx] = r; img.data[idx + 1] = g; img.data[idx + 2] = b; img.data[idx + 3] = 255;
+      }
+    }
+    ctx.putImageData(img, 0, 0);
+  }, [min, max, width, height, cmap]);
+  return (
+    <div className="flex items-center gap-2 w-full" style={{ maxWidth: width + 70 }}>
+      <span className="text-[10px] text-slate-600 font-mono w-10 text-left">{min.toFixed(2)}</span>
+      <canvas ref={ref} className="border rounded flex-shrink-0" style={{ width, height }} />
+      <span className="text-[10px] text-slate-600 font-mono w-10 text-right">{max.toFixed(2)}</span>
+    </div>
+  );
 }
 
 export default function GaussianRandomFieldApp() {
@@ -376,8 +454,8 @@ export default function GaussianRandomFieldApp() {
   }, []);
 
   // Grid size (fixed in UI for now; setters omitted to satisfy ESLint)
-  const [nx] = useState(150);
-  const [ny] = useState(110);
+  const [nx] = useState(128);
+  const [ny] = useState(128);
 
   const [model, setModel] = useState<"spherical" | "exponential" | "matern">("spherical");
   const [nu, setNu] = useState<0.5 | 1.5 | 2.5>(1.5);
@@ -388,9 +466,11 @@ export default function GaussianRandomFieldApp() {
   const [zoom, setZoom] = useState(3);
   const [autoRegenerate, setAutoRegenerate] = useState(true);
   const [padFFT, setPadFFT] = useState(true);
+  const [colorMap, setColorMap] = useState<ColorMapId>("terrain");
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [field, setField] = useState<Float64Array | null>(null);
+  const [fieldStats, setFieldStats] = useState<{ min: number; max: number } | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [testReport, setTestReport] = useState<string>("");
 
@@ -421,8 +501,13 @@ export default function GaussianRandomFieldApp() {
 
   useEffect(() => {
     if (!canvasRef.current || !field) return;
-    drawFieldToCanvas(canvasRef.current, field, nx, ny, zoom);
-  }, [field, nx, ny, zoom]);
+    // compute stats once, then draw using selected color map
+    let min = Infinity, max = -Infinity;
+    for (const v of field) { if (v < min) min = v; if (v > max) max = v; }
+    if (min === Infinity || max === -Infinity) { min = 0; max = 1; }
+    drawFieldToCanvas(canvasRef.current, field, nx, ny, zoom, colorMap, min, max);
+    setFieldStats({ min, max });
+  }, [field, nx, ny, zoom, colorMap]);
 
   // --- Tiny test harness ---
   function runTests() {
@@ -591,6 +676,28 @@ export default function GaussianRandomFieldApp() {
                     <div className="w-full overflow-auto">
                       <canvas ref={canvasRef} className="block" />
                     </div>
+                    {fieldStats && (
+                      <div className="px-3 pb-3 pt-4 border-t bg-slate-50/60">
+                        <div className="flex items-center justify-between mb-2 text-xs text-slate-600">
+                          <span>Color Scale</span>
+                          <span className="flex items-center gap-2">σ≈1 (normalized)
+                            <Select value={colorMap} onValueChange={(v)=>setColorMap(v as ColorMapId)}>
+                              <SelectTrigger className="h-6 w-28 text-xs">
+                                <SelectValue />
+                              </SelectTrigger>
+                              <SelectContent className="text-xs">
+                                <SelectItem value="terrain">Terrain</SelectItem>
+                                <SelectItem value="viridis">Viridis</SelectItem>
+                                <SelectItem value="magma">Magma</SelectItem>
+                                <SelectItem value="coolwarm">CoolWarm</SelectItem>
+                                <SelectItem value="grayscale">Grayscale</SelectItem>
+                              </SelectContent>
+                            </Select>
+                          </span>
+                        </div>
+                        <ColorBar min={fieldStats.min} max={fieldStats.max} cmap={colorMap} />
+                      </div>
+                    )}
                   </div>
                 </CardContent>
               </Card>
