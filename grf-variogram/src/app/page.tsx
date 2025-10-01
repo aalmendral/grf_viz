@@ -1,9 +1,9 @@
-"use client";  // <-- add this line, at line 1
-
 // Version 1.0 — arbitrary-size FFT (no power-of-two snapping)
 // =====================================================
 // 2D Gaussian Random Field — Variogram Visualizer
 // =====================================================
+
+"use client";
 
 import React, { useEffect, useRef, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
@@ -22,7 +22,6 @@ import FFT from "fft.js";
 // 2D GAUSSIAN RANDOM FIELD — VARIOGRAM-DRIVEN SAMPLER
 // Circulant embedding + FFT-based spectral synthesis
 // Models: Spherical, Exponential, Matérn (ν = 0.5, 1.5, 2.5)
-// Anisotropy via range (major), subrange (minor), and azimuth (deg)
 // =====================================================
 
 // ------------------ Utility ------------------
@@ -89,7 +88,7 @@ function buildCovarianceKernel({
   const st = Math.sin(theta);
 
   const cov = new Float64Array(nx * ny);
-  const chooseCov = (r: number) => {
+  const chooseCov = (r: number): number => {
     if (model === "spherical") return sphericalCov(r, 1);
     if (model === "exponential") return exponentialCov(r, 1);
     return maternCov(r, 1, maternNu);
@@ -113,24 +112,30 @@ function buildCovarianceKernel({
 
 // ------------------ Arbitrary-size 1D FFT via Bluestein ------------------
 // We implement Bluestein (chirp-z) to support any N using fft.js for the convolution step.
-// Reference: Bluestein 1968. For forward transform: Y[k] = sum_n x[n] e^{-2πi n k / N}.
+// Reference: Bluestein 1968.
 
 function fftConvolve(aRe: Float64Array, aIm: Float64Array, bRe: Float64Array, bIm: Float64Array) {
-  const M = aRe.length; // must equal b length
+  const M = aRe.length; // length must match b
   const f = new FFT(M);
   const A = f.createComplexArray();
   const B = f.createComplexArray();
   const FA = f.createComplexArray();
   const FB = f.createComplexArray();
-  for (let i = 0; i < M; i++) { A[2*i] = aRe[i]; A[2*i+1] = aIm[i]; B[2*i] = bRe[i]; B[2*i+1] = bIm[i]; }
+  for (let i = 0; i < M; i++) {
+    A[2 * i] = aRe[i];
+    A[2 * i + 1] = aIm[i];
+    B[2 * i] = bRe[i];
+    B[2 * i + 1] = bIm[i];
+  }
   f.transform(FA, A);
   f.transform(FB, B);
   // pointwise multiply
   for (let i = 0; i < M; i++) {
-    const ar = FA[2*i], ai = FA[2*i+1], br = FB[2*i], bi = FB[2*i+1];
+    const ar = FA[2 * i], ai = FA[2 * i + 1], br = FB[2 * i], bi = FB[2 * i + 1];
     const rr = ar * br - ai * bi;
     const ii = ar * bi + ai * br;
-    FA[2*i] = rr; FA[2*i+1] = ii;
+    FA[2 * i] = rr;
+    FA[2 * i + 1] = ii;
   }
   // inverse
   const out = f.createComplexArray();
@@ -138,13 +143,15 @@ function fftConvolve(aRe: Float64Array, aIm: Float64Array, bRe: Float64Array, bI
   const outRe = new Float64Array(M);
   const outIm = new Float64Array(M);
   const scale = 1 / M; // fft.js inverse is unnormalized
-  for (let i = 0; i < M; i++) { outRe[i] = out[2*i] * scale; outIm[i] = out[2*i+1] * scale; }
+  for (let i = 0; i < M; i++) {
+    outRe[i] = out[2 * i] * scale;
+    outIm[i] = out[2 * i + 1] * scale;
+  }
   return { re: outRe, im: outIm };
 }
 
 function fft1dAny(reIn: Float64Array, imIn: Float64Array, N: number, inverse = false) {
   if (N === 1) return { re: Float64Array.from(reIn), im: Float64Array.from(imIn) };
-  // Bluestein setup
   const M = nextPow2(2 * N - 1);
   const aRe = new Float64Array(M);
   const aIm = new Float64Array(M);
@@ -152,18 +159,17 @@ function fft1dAny(reIn: Float64Array, imIn: Float64Array, N: number, inverse = f
   const bIm = new Float64Array(M);
 
   const sign = inverse ? 1 : -1;
-  // Precompute chirp c[n] = exp(i*pi*sign * n^2 / N)
+  // a[n] = x[n] * conj(c[n])
   for (let n = 0; n < N; n++) {
     const ang = Math.PI * sign * (n * n) / N;
     const cos = Math.cos(ang), sin = Math.sin(ang);
-    // a[n] = x[n] * conj(c[n]) for forward; for inverse, x[n] * conj(c[n]) with sign flip matches below
     const xr = reIn[n] || 0, xi = imIn[n] || 0;
-    // conj(c[n]) = cos - i sin
-    const ar = xr * cos + xi * sin;
+    const ar = xr * cos + xi * sin; // conj(c) multiply
     const ai = -xr * sin + xi * cos;
-    aRe[n] = ar; aIm[n] = ai;
+    aRe[n] = ar;
+    aIm[n] = ai;
   }
-  // b[0] = 1; for k=1..N-1, b[k] = c[k], and mirror b[M-k] = c[k]
+  // b[0] = 1; for k>0, b[k] = c[k]; mirror b[M-k]
   bRe[0] = 1; bIm[0] = 0;
   for (let k = 1; k < N; k++) {
     const ang = Math.PI * sign * (k * k) / N;
@@ -174,16 +180,15 @@ function fft1dAny(reIn: Float64Array, imIn: Float64Array, N: number, inverse = f
 
   const { re: convRe, im: convIm } = fftConvolve(aRe, aIm, bRe, bIm);
 
-  // y[k] = conv[k] * conj(c[k])
+  // y[k] = conv[k] * conj(c[k]) (and 1/N on inverse)
   const yRe = new Float64Array(N);
   const yIm = new Float64Array(N);
-  const norm = inverse ? 1 / N : 1; // normalize inverse
+  const norm = inverse ? 1 / N : 1;
   for (let k = 0; k < N; k++) {
     const ang = Math.PI * sign * (k * k) / N;
     const cos = Math.cos(ang), sin = Math.sin(ang);
     const vr = convRe[k];
     const vi = convIm[k];
-    // multiply by conj(c[k]) = cos - i sin
     const rr = vr * cos + vi * sin;
     const ii = -vr * sin + vi * cos;
     yRe[k] = rr * norm;
@@ -214,8 +219,8 @@ function fft2dRealForward(dataRe: Float64Array, nx: number, ny: number) {
 }
 
 function ifft2dToReal(reIn: Float64Array, imIn: Float64Array, nx: number, ny: number) {
-  let re = new Float64Array(reIn);
-  let im = new Float64Array(imIn);
+  const re = new Float64Array(reIn);
+  const im = new Float64Array(imIn);
   // inverse rows
   for (let j = 0; j < ny; j++) {
     const ofs = j * nx;
@@ -237,9 +242,9 @@ function ifft2dToReal(reIn: Float64Array, imIn: Float64Array, nx: number, ny: nu
 }
 
 function sqrtClamp(arr: Float64Array, eps = 1e-12) {
-  const re = new Float64Array(arr.length);
-  for (let i = 0; i < arr.length; i++) re[i] = Math.sqrt(Math.max(eps, arr[i]));
-  return re;
+  const out = new Float64Array(arr.length);
+  for (let i = 0; i < arr.length; i++) out[i] = Math.sqrt(Math.max(eps, arr[i]));
+  return out;
 }
 
 function generateGRF({
@@ -304,15 +309,15 @@ function generateGRF({
     }
 
     // normalize
-    let mean = 0; for (let v of out) mean += v; mean /= out.length;
-    let varsum = 0; for (let v of out) varsum += (v - mean) * (v - mean);
+    let mean = 0; for (const v of out) mean += v; mean /= out.length;
+    let varsum = 0; for (const v of out) varsum += (v - mean) * (v - mean);
     const std = Math.sqrt(varsum / out.length) || 1;
     for (let i = 0; i < out.length; i++) out[i] = (out[i] - mean) / std;
     return out;
   } else {
     const field = makeSample(nx, ny);
-    let mean = 0; for (let v of field) mean += v; mean /= field.length;
-    let varsum = 0; for (let v of field) varsum += (v - mean) * (v - mean);
+    let mean = 0; for (const v of field) mean += v; mean /= field.length;
+    let varsum = 0; for (const v of field) varsum += (v - mean) * (v - mean);
     const std = Math.sqrt(varsum / field.length) || 1;
     for (let i = 0; i < field.length; i++) field[i] = (field[i] - mean) / std;
     return field;
@@ -335,9 +340,8 @@ function drawFieldToCanvas(
 
   const img = ctx.createImageData(w, h);
 
-  let fmin = Infinity,
-    fmax = -Infinity;
-  for (let v of field) {
+  let fmin = Infinity, fmax = -Infinity;
+  for (const v of field) {
     if (v < fmin) fmin = v;
     if (v > fmax) fmax = v;
   }
@@ -371,9 +375,9 @@ export default function GaussianRandomFieldApp() {
     return () => { style.remove(); };
   }, []);
 
-  // Requested grid (now used directly, no snapping)
-  const [nx, setNx] = useState(150);
-  const [ny, setNy] = useState(110);
+  // Grid size (fixed in UI for now; setters omitted to satisfy ESLint)
+  const [nx] = useState(150);
+  const [ny] = useState(110);
 
   const [model, setModel] = useState<"spherical" | "exponential" | "matern">("spherical");
   const [nu, setNu] = useState<0.5 | 1.5 | 2.5>(1.5);
@@ -430,8 +434,9 @@ export default function GaussianRandomFieldApp() {
         fn();
         lines.push(`✔ ${name}`);
         pass++;
-      } catch (e: any) {
-        lines.push(`✘ ${name} -> ${e?.message ?? e}`);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        lines.push(`✘ ${name} -> ${msg}`);
         fail++;
       }
     }
@@ -446,7 +451,6 @@ export default function GaussianRandomFieldApp() {
       re[1] = 1; // x[n] = δ[n-1]
       const { re: R, im: I } = fft1dAny(re, im, N, false);
       for (let k = 0; k < N; k++) {
-        // |X[k]| should be 1 for delta input
         const mag = Math.hypot(R[k], I[k]);
         if (Math.abs(mag - 1) > 1e-9) throw new Error(`mag != 1 at k=${k}: ${mag}`);
       }
@@ -464,14 +468,14 @@ export default function GaussianRandomFieldApp() {
       if (err > 1e-6) throw new Error(`ifft error too large: ${err}`);
     });
 
-    // New: covariance models differ and Matérn ν ordering
+    // Covariance differences & Matérn ν ordering
     t("Covariance models differ (r=0.5)", () => {
       const r = 0.5, a = 1;
       const cS = sphericalCov(r, a);
       const cE = exponentialCov(r, a);
       if (Math.abs(cS - cE) < 1e-6) throw new Error("spherical and exponential too similar at r=0.5");
     });
-    t("Matérn ν=2.5 gives larger covariance than ν=0.5 at r=0.8", () => {
+    t("Matérn ν=2.5 > ν=0.5 at r=0.8", () => {
       const r = 0.8, a = 1;
       const c05 = maternCov(r, a, 0.5);
       const c25 = maternCov(r, a, 2.5);
@@ -481,22 +485,22 @@ export default function GaussianRandomFieldApp() {
     t("GRF generation on prime-ish sizes (129x97)", () => {
       const fld = generateGRF({ nx: 129, ny: 97, model: "exponential", rangeMajor: 20, rangeMinor: 10, azimuthDeg: 25, maternNu: 1.5, seed: 12, padFFT: false });
       if (fld.length !== 129 * 97) throw new Error("length mismatch");
-      for (let v of fld) if (!Number.isFinite(v)) throw new Error("non-finite");
+      for (const v of fld) if (!Number.isFinite(v)) throw new Error("non-finite");
     });
 
     t("Padded generation crops to requested size (150x110 from 2× embed)", () => {
       const fld = generateGRF({ nx: 150, ny: 110, model: "matern", rangeMajor: 24, rangeMinor: 16, azimuthDeg: 40, maternNu: 2.5, seed: 3, padFFT: true, padFactor: 2 });
       if (fld.length !== 150 * 110) throw new Error("padded length mismatch");
-      for (let v of fld) if (!Number.isFinite(v)) throw new Error("non-finite after pad");
+      for (const v of fld) if (!Number.isFinite(v)) throw new Error("non-finite after pad");
     });
 
     // Padding should change the realization with the same seed (different embedding), but keep size
     t("Padding toggles change sample but preserve length", () => {
       const a = generateGRF({ nx: 100, ny: 80, model: "spherical", rangeMajor: 20, rangeMinor: 12, azimuthDeg: 10, maternNu: 1.5, seed: 7, padFFT: false });
       const b = generateGRF({ nx: 100, ny: 80, model: "spherical", rangeMajor: 20, rangeMinor: 12, azimuthDeg: 10, maternNu: 1.5, seed: 7, padFFT: true, padFactor: 2 });
-      expect(a.length === b.length && a.length === 100 * 80, "lengths differ");
+      if (a.length !== b.length || a.length !== 100 * 80) throw new Error("lengths differ");
       let diff = 0; for (let i = 0; i < a.length; i++) diff += Math.abs(a[i] - b[i]);
-      expect(diff > 1e-6, "padding produced identical sample (unexpected)");
+      if (!(diff > 1e-6)) throw new Error("padding produced identical sample (unexpected)");
     });
 
     // Extra: 1D arbitrary-size forward+inverse sanity (N=9)
@@ -506,7 +510,7 @@ export default function GaussianRandomFieldApp() {
       const im = new Float64Array(N);
       for (let n = 0; n < N; n++) re[n] = Math.sin(0.3 * n) + 0.1 * n;
       const { re: R, im: I } = fft1dAny(re, im, N, false);
-      const { re: r2, im: i2 } = fft1dAny(R, I, N, true);
+      const { re: r2 } = fft1dAny(R, I, N, true);
       let err = 0;
       for (let n = 0; n < N; n++) err += Math.abs(r2[n] - re[n]);
       err /= N;
@@ -540,7 +544,7 @@ export default function GaussianRandomFieldApp() {
             <TabsTrigger value="tests"><Bug className="h-4 w-4 mr-1" />Tests</TabsTrigger>
           </TabsList>
 
-          <TabsContent value="viewer">
+        <TabsContent value="viewer">
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <Card className="col-span-2 shadow-sm">
                 <CardContent className="p-4">
@@ -596,7 +600,7 @@ export default function GaussianRandomFieldApp() {
                   {/* Variogram model choice */}
                   <div>
                     <Label className="mb-1 block">Variogram model</Label>
-                    <Select value={model} onValueChange={(v) => setModel(v as any)}>
+                    <Select value={model} onValueChange={(v) => setModel(v as "spherical" | "exponential" | "matern")}>
                       <SelectTrigger>
                         <SelectValue placeholder="Select model" />
                       </SelectTrigger>
@@ -612,7 +616,7 @@ export default function GaussianRandomFieldApp() {
                   {model === "matern" && (
                     <div>
                       <Label className="mb-1 block">Matérn smoothness ν</Label>
-                      <Select value={String(nu)} onValueChange={(v) => setNu(Number(v) as any)}>
+                      <Select value={String(nu)} onValueChange={(v) => setNu(Number(v) as 0.5 | 1.5 | 2.5)}>
                         <SelectTrigger>
                           <SelectValue />
                         </SelectTrigger>
